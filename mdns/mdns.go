@@ -199,7 +199,7 @@ func (c *connector) readloop(in chan pkt) {
 		msg, addr, err := c.readMessage()
 		if err != nil {
 			// log dud packets
-			log.Printf("Could not read from %s: %s", c.UDPConn, err)
+			log.Printf("Could not read from %v: %s", c.UDPConn, err)
 			continue
 		}
 		if len(msg.Question) > 0 {
