@@ -1,16 +1,21 @@
 package source
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"net"
 	"strings"
+	"time"
 
 	"github.com/blake/external-mdns/resource"
 	"github.com/jpillora/go-tld"
 	informers "github.com/traefik/traefik/v3/pkg/provider/kubernetes/crd/generated/informers/externalversions"
 	traefikio "github.com/traefik/traefik/v3/pkg/provider/kubernetes/crd/traefikio/v1alpha1"
 	"github.com/traefik/traefik/v3/pkg/rules"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -34,6 +39,7 @@ type TraefikIngressRouteSource struct {
 	namespace      string
 	notifyChan     chan<- resource.Resource
 	sharedInformer cache.SharedIndexInformer
+	dstIPAddr      []net.IP
 }
 
 func (s *TraefikIngressRouteSource) Run(stopCh chan struct{}) error {
@@ -98,8 +104,12 @@ func (s *TraefikIngressRouteSource) buildRecords(obj interface{}, action string)
 		return records, nil
 	}
 
-	// We hardcode the IP for now
-	const ip = "192.168.1.39"
+	var ipAddrs []string
+	for _, ip := range s.dstIPAddr {
+		if len(ip) != 0 {
+			ipAddrs = append(ipAddrs, ip.String())
+		}
+	}
 
 	parser, err := rules.NewParser(matchers)
 	if err != nil {
@@ -148,7 +158,7 @@ func (s *TraefikIngressRouteSource) buildRecords(obj interface{}, action string)
 				Action:     action,
 				Name:       hostname,
 				Namespace:  ingress.Namespace,
-				IPs:        []string{ip},
+				IPs:        ipAddrs,
 			}
 
 			records = append(records, advertiseObj)
@@ -158,12 +168,28 @@ func (s *TraefikIngressRouteSource) buildRecords(obj interface{}, action string)
 	return records, nil
 }
 
-func NewTraefikIngressRouteWatcher(factory informers.SharedInformerFactory, namespace string, notifyChan chan<- resource.Resource) TraefikIngressRouteSource {
+func NewTraefikIngressRouteWatcher(
+	client kubernetes.Interface,
+	factory informers.SharedInformerFactory,
+	namespace string,
+	notifyChan chan<- resource.Resource,
+) TraefikIngressRouteSource {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Get the Traefik service IP addresses
+	dstIPs, err := getDstIPAddr(ctx, client)
+	if err != nil {
+		log.Fatalf("Failed to get Traefik service IP addresses: %v", err)
+	}
+	log.Printf("Traefik service IP addresses: %v", dstIPs)
+
 	ingressInformer := factory.Traefik().V1alpha1().IngressRoutes().Informer()
 	i := &TraefikIngressRouteSource{
 		namespace:      namespace,
 		notifyChan:     notifyChan,
 		sharedInformer: ingressInformer,
+		dstIPAddr:      dstIPs,
 	}
 
 	_, _ = ingressInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -173,6 +199,38 @@ func NewTraefikIngressRouteWatcher(factory informers.SharedInformerFactory, name
 	})
 
 	return *i
+}
+
+func getDstIPAddr(ctx context.Context, client kubernetes.Interface) ([]net.IP, error) {
+	// Find the Traefik service
+	services, err := client.CoreV1().Services("").List(ctx, v1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	var dstIPs []net.IP
+	for _, service := range services.Items {
+		if service.Labels["app.kubernetes.io/name"] != "traefik" {
+			continue
+		}
+
+		// Check if the service has a LoadBalancer
+		if service.Spec.Type != "LoadBalancer" {
+			continue
+		}
+
+		// Get the LoadBalancer IPs
+		for _, ingress := range service.Status.LoadBalancer.Ingress {
+			ip := net.ParseIP(ingress.IP)
+			if ip != nil {
+				dstIPs = append(dstIPs, ip)
+			} else {
+				log.Printf("Unable to parse IP address %s", ingress.IP)
+			}
+		}
+	}
+
+	return dstIPs, nil
 }
 
 func extractHosts(tree *rules.Tree) ([]string, error) {

@@ -262,7 +262,7 @@ func main() {
 				log.Fatalf("Failed to create Traefik client: %v", err)
 			}
 			factory := traefikInformers.NewSharedInformerFactory(traefikClient, 0)
-			ingressRouteController := source.NewTraefikIngressRouteWatcher(factory, namespace, notifyMdns)
+			ingressRouteController := source.NewTraefikIngressRouteWatcher(k8sClient, factory, namespace, notifyMdns)
 			go ingressRouteController.Run(stopper)
 		}
 	}
