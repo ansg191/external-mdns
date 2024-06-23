@@ -1,28 +1,48 @@
-FROM --platform=$BUILDPLATFORM golang:1.22 as build
-LABEL maintainer="Blake Covarrubias <blake@covarrubi.as>" \
-      org.opencontainers.image.authors="Blake Covarrubias <blake@covarrubi.as>" \
-      org.opencontainers.image.description="Advertises records for Kubernetes resources over multicast DNS." \
-      org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.source="git@github.com:blake/external-mdns" \
-      org.opencontainers.image.title="external-mdns" \
-      org.opencontainers.image.url="https://github.com/blake/external-mdns"
+# syntax=docker/dockerfile:1
 
-ARG TARGETOS
+################################################################################
+ARG GO_VERSION=1.22
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION} AS build
+WORKDIR /src
+
+# Download dependencies as a separate step to take advantage of Docker's caching.
+# Leverage a cache mount to /go/pkg/mod/ to speed up subsequent builds.
+# Leverage bind mounts to go.sum and go.mod to avoid having to copy them into
+# the container.
+RUN --mount=type=cache,target=/go/pkg/mod/ \
+    --mount=type=bind,source=go.sum,target=go.sum \
+    --mount=type=bind,source=go.mod,target=go.mod \
+    go mod download -x
+
 ARG TARGETARCH
-ARG TARGETVARIANT
 
-ADD . /go/src/github.com/blake/external-mdns
-WORKDIR /go/src/github.com/blake/external-mdns
+# Build the application.
+# Leverage a cache mount to /go/pkg/mod/ to speed up subsequent builds.
+# Leverage a bind mount to the current directory to avoid having to copy the
+# source code into the container.
+RUN --mount=type=cache,target=/go/pkg/mod/ \
+    --mount=type=bind,target=. \
+    CGO_ENABLED=0 GOARCH=$TARGETARCH go build -o /bin/server .
 
-RUN mkdir -p /release/etc &&\
-    echo nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin > /release/etc/passwd &&\
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOARM=$(echo ${TARGETVARIANT} | cut -c2) \
-    go build \
-    -ldflags="-s -w" \
-    -o /release/external-mdns .
+# Create a non-privileged user that the app will run under.
+ARG UID=10001
+RUN adduser \
+    --disabled-password \
+    --gecos "" \
+    --home "/nonexistent" \
+    --shell "/sbin/nologin" \
+    --no-create-home \
+    --uid "${UID}" \
+    appuser
 
+################################################################################
+FROM scratch AS final
 
-FROM scratch
-COPY --from=build /release /
-USER nobody
-ENTRYPOINT ["/external-mdns"]
+# Copy the non-privileged user from the "build" stage.
+COPY --from=build /etc/passwd /etc/passwd
+
+# Copy the executable from the "build" stage.
+COPY --from=build /bin/server /bin/
+
+# What the container should run when it is started.
+ENTRYPOINT [ "/bin/server" ]
