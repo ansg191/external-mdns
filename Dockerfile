@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.16 as build
+FROM --platform=$BUILDPLATFORM golang:1.22 as build
 LABEL maintainer="Blake Covarrubias <blake@covarrubi.as>" \
       org.opencontainers.image.authors="Blake Covarrubias <blake@covarrubi.as>" \
       org.opencontainers.image.description="Advertises records for Kubernetes resources over multicast DNS." \
